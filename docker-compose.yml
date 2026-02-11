@@ -7,12 +7,12 @@ services:
     env_file:
       - .env
     environment:
-      # Переопределяем путь к chromedriver и файлу кеша куков внутри контейнера
       - CHROME_DRIVER_PATH=/usr/bin/chromedriver
       - COOKIES_CACHE_FILE=/data/cookies_cache.json
+      - DATABASE_URL=sqlite:////app/data/parser.db
+
     volumes:
-      - ./parser.db:/app/parser.db
-      - ./cookies_cache.json:/data/cookies_cache.json
+      - ./data:/app/data
       - ./logs:/app/logs
     restart: unless-stopped
     shm_size: 1g
