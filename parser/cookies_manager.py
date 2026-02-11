@@ -2,16 +2,18 @@ import requests
 import asyncio
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import time
 import uuid
 import logging
 import json
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
-# Файл для кеширования куков
-# COOKIES_CACHE_FILE = "cookies_cache.json"
 COOKIES_CACHE_FILE = os.getenv("COOKIES_CACHE_FILE", "cookies_cache.json")
 
 class CookiesManager:
@@ -19,10 +21,9 @@ class CookiesManager:
         self.cookies = None
         self.device_id = f"site_{uuid.uuid4().hex}"
         self.last_update = 0
-        self.update_interval = 3600  # обновляем куки каждый час (3600 сек)
+        self.update_interval = 1800  # Уменьшили до 30 минут — токен живёт недолго
         self.updating = False
 
-        # Загружаем кеш если есть и он свежий
         self._load_cookies_from_cache()
 
         self.base_headers = {
@@ -30,26 +31,25 @@ class CookiesManager:
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
             'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                 'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/121.0.6167.160 Safari/537.36'
+                'Chrome/143.0.0.0 Safari/537.36'
             ),
             'Cache-Control': 'no-cache',
             'DNT': '1',
             'Priority': 'u=1, i',
-            'Sec-CH-UA': '"Not_A Brand";v="99", "Chromium";v="121"',
+            'Sec-CH-UA': '"Chromium";v="143", "Not A(Brand";v="24"',
             'Sec-CH-UA-Mobile': '?0',
-            'Sec-CH-UA-Platform': '"Windows"',
+            'Sec-CH-UA-Platform': '"macOS"',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'X-Requested-With': 'XMLHttpRequest',
-            'X-Spa-Version': '13.15.4',
+            'X-Spa-Version': '13.22.10',
             'X-UserID': '0'
         }
 
     def _load_cookies_from_cache(self):
-        """Загружает куки из кеш-файла если он существует и свежий (менее 1 часа)."""
         try:
             if os.path.exists(COOKIES_CACHE_FILE):
                 with open(COOKIES_CACHE_FILE, 'r') as f:
@@ -57,33 +57,32 @@ class CookiesManager:
                     self.cookies = data.get('cookies')
                     cache_timestamp = data.get('timestamp', 0)
                     
-                    # Проверяем свежесть кеша: прошло менее 1 часа?
                     current_time = time.time()
                     cache_age = current_time - cache_timestamp
                     
                     if cache_age < self.update_interval:
                         self.last_update = cache_timestamp
                         if self.cookies:
-                            logger.info(f"✅ Cookies loaded from cache ({int(cache_age)}s old, {len(self.cookies)} cookies)")
+                            # Проверяем наличие критического x_wbaas_token
+                            has_token = any(c.get('name') == 'x_wbaas_token' for c in self.cookies)
+                            if has_token:
+                                logger.info(f"✅ Cookies loaded from cache ({int(cache_age)}s old, {len(self.cookies)} cookies, has token)")
+                            else:
+                                logger.warning("Cached cookies missing x_wbaas_token, will refresh")
+                                self.cookies = None
                     else:
-                        # Кеш старый, нужно обновить
                         self.cookies = None
-                        logger.info(f"⏰ Cookies cache expired ({int(cache_age)}s old), need fresh update")
+                        logger.info(f"⏰ Cookies cache expired ({int(cache_age)}s old)")
         except Exception as e:
             logger.warning(f"Could not load cookies from cache: {e}")
             self.cookies = None
 
     def _save_cookies_to_cache(self):
-        """Сохраняет куки в кеш-файл с временной меткой."""
         try:
             if self.cookies:
-                # Убедимся, что директория существует (если путь содержит директорию)
-                try:
-                    parent = os.path.dirname(COOKIES_CACHE_FILE)
-                    if parent and not os.path.exists(parent):
-                        os.makedirs(parent, exist_ok=True)
-                except Exception:
-                    pass
+                parent = os.path.dirname(COOKIES_CACHE_FILE)
+                if parent and not os.path.exists(parent):
+                    os.makedirs(parent, exist_ok=True)
 
                 with open(COOKIES_CACHE_FILE, 'w') as f:
                     json.dump({
@@ -95,20 +94,10 @@ class CookiesManager:
             logger.warning(f"Could not save cookies to cache: {e}")
 
     async def update_cookies(self, force: bool = False):
-        """Обновляет куки через Selenium, если не удалось — через requests.
-        
-        Стратегия:
-        1. Если кеш свежий (< 1 часа) - используем его
-        2. Если кеш старый или отсутствует - обновляем через Selenium
-        3. Если Selenium не сработал - fallback на requests
-        4. Сохраняем результат в кеш
-        """
         if self.updating:
             logger.warning("Cookies update already running — skipping.")
             return
 
-        # Если куки есть и свежие (прошло менее 1 часа) - ничего не делаем,
-        # за исключением случая принудительного обновления (force=True).
         if self.cookies and not self.should_update_cookies() and not force:
             logger.info("✅ Cookies are fresh, using cached version")
             return
@@ -122,12 +111,12 @@ class CookiesManager:
                 logger.info("✅ Cookies updated successfully via Selenium")
                 return
 
-            logger.warning("⚠️ Selenium failed — fallback to requests...")
+            logger.warning("⚠️ Selenium failed — trying requests fallback...")
             await self._update_cookies_via_requests()
             
             if self.cookies:
                 self._save_cookies_to_cache()
-                logger.info("✅ Cookies updated successfully via requests fallback")
+                logger.info("✅ Cookies updated via requests fallback")
             else:
                 logger.error("❌ Failed to update cookies via both methods")
 
@@ -135,7 +124,6 @@ class CookiesManager:
             self.updating = False
 
     async def _update_cookies_via_selenium(self):
-        """Асинхронный вызов Selenium."""
         try:
             logger.info("Launching Selenium...")
 
@@ -145,10 +133,9 @@ class CookiesManager:
                 self._selenium_fetch_cookies
             )
 
-            if selenium_cookies:
+            if selenium_cookies and len(selenium_cookies) >= 2:
                 self.cookies = selenium_cookies
                 self.last_update = time.time()
-                logger.info(f"✅ Cookies updated via Selenium: {len(self.cookies)} cookies")
                 return True
 
             return False
@@ -158,81 +145,172 @@ class CookiesManager:
             return False
 
     def _selenium_fetch_cookies(self):
-        """Синхронная загрузка куков — запускается в executor."""
+        driver = None
         try:
-            options = webdriver.ChromeOptions()
+            options = Options()
 
-            # Новый headless — обязательный, иначе WB даёт 1 cookie
+            # Критические флаги для контейнера
             options.add_argument("--headless=new")
-
-            # Для контейнеров Amvera
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
-
-            # Anti-bot обход
+            options.add_argument("--disable-gpu")
+            
+            # Маскировка под macOS (как в вашем рабочем curl)
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--start-maximized")
+            
+            # Анти-детект
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option("useAutomationExtension", False)
-
-            # Нормальный экран браузера
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-extensions")
-
-            # Настоящий User-Agent
+            
+            # Важно: отключаем DevTools чтобы не было navigator.webdriver
+            options.add_argument("--remote-debugging-port=0")
+            
+            # User-Agent как в рабочем запросе
             options.add_argument(
-                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/121.0.6167.160 Safari/537.36"
+                "Chrome/143.0.0.0 Safari/537.36"
             )
 
-            # Запуск браузера
+            # Запускаем Chrome
             try:
-                from webdriver_manager.chrome import ChromeDriverManager
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=options)
-            except Exception:
                 driver = webdriver.Chrome(options=options)
+            except Exception as e:
+                logger.error(f"Failed to start Chrome with default options: {e}")
+                service = Service('/usr/local/bin/chromedriver')
+                driver = webdriver.Chrome(service=service, options=options)
 
-            try:
-                logger.info("🌐 Opening WB site via Selenium...")
-                # Установляем большой timeout для медленного интернета
-                driver.set_page_load_timeout(20)
-                driver.get("https://www.wildberries.ru/")
-                
-                # Даём время на загрузку JS и установку cookies
-                time.sleep(5)
+            # Скрываем автоматизацию через CDP
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': '''
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['ru-RU', 'ru', 'en-US', 'en']
+                    });
+                    window.chrome = { runtime: {} };
+                    window.navigator.chrome = { runtime: {} };
+                '''
+            })
 
+            logger.info("🌐 Opening WB site...")
+            driver.set_page_load_timeout(45)
+            
+            # Шаг 1: Заходим на главную
+            driver.get("https://www.wildberries.ru/")
+            
+            # Ждём загрузки страницы (проверяем наличие body)
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located(("tag name", "body"))
+            )
+            
+            # Шаг 2: Ждём выполнения JS-челленджа (критично!)
+            # x_wbaas_token появляется через 3-8 секунд после загрузки
+            time.sleep(10)
+            
+            # Шаг 3: Скроллим чтобы активировать ленивую загрузку
+            driver.execute_script("window.scrollTo(0, 500);")
+            time.sleep(2)
+            driver.execute_script("window.scrollTo(0, 1000);")
+            time.sleep(3)
+            
+            # Шаг 4: Проверяем, появился ли x_wbaas_token
+            cookies = driver.get_cookies()
+            cookie_dict = {c['name']: c['value'] for c in cookies}
+            
+            logger.info(f"Cookies after first load: {list(cookie_dict.keys())}")
+            
+            # Если токена нет — пробуем кликнуть по любому элементу (имитация пользователя)
+            if 'x_wbaas_token' not in cookie_dict:
+                logger.warning("x_wbaas_token not found, trying user interaction...")
+                try:
+                    # Ищем любую ссылку и наводим на неё
+                    links = driver.find_elements("tag name", "a")
+                    if links:
+                        driver.execute_script("arguments[0].scrollIntoView();", links[0])
+                        time.sleep(1)
+                        # Не кликаем, просто наводим — иногда достаточно
+                        driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));", links[0])
+                        time.sleep(3)
+                        
+                        # Перезагружаем куки
+                        cookies = driver.get_cookies()
+                        cookie_dict = {c['name']: c['value'] for c in cookies}
+                        logger.info(f"Cookies after interaction: {list(cookie_dict.keys())}")
+                except Exception as e:
+                    logger.warning(f"Interaction failed: {e}")
+
+            # Шаг 5: Если всё ещё нет токена — пробуем перейти на страницу поиска
+            if 'x_wbaas_token' not in cookie_dict:
+                logger.warning("Still no token, navigating to search page...")
+                driver.get("https://www.wildberries.ru/catalog/0/search.aspx?search=iphone")
+                time.sleep(8)
                 cookies = driver.get_cookies()
-                logger.info(f"✅ Got {len(cookies)} cookies from Selenium")
 
-                return cookies if cookies else None
+            logger.info(f"✅ Final cookies count: {len(cookies)}")
+            for c in cookies:
+                logger.info(f"  - {c['name']}: {c['value'][:50]}..." if len(c['value']) > 50 else f"  - {c['name']}: {c['value']}")
 
-            finally:
-                driver.quit()
+            # Проверяем наличие критических куков
+            critical_cookies = ['_wbauid', 'x_wbaas_token']
+            present = [c['name'] for c in cookies if c['name'] in critical_cookies]
+            logger.info(f"Critical cookies present: {present}")
+
+            return cookies if cookies else None
 
         except Exception as e:
             logger.error(f"❌ Selenium fatal error: {e}", exc_info=True)
             return None
+            
+        finally:
+            if driver:
+                driver.quit()
 
     async def _update_cookies_via_requests(self):
-        """Fallback — минимальные куки через обычный GET с retry."""
+        """Fallback — пробуем получить начальные куки через requests."""
         try:
-            logger.info("📡 Trying requests cookie fetch (fallback)...")
+            logger.info("📡 Trying requests cookie fetch...")
             loop = asyncio.get_event_loop()
 
             def fetch():
+                session = requests.Session()
                 headers = self.base_headers.copy()
+                
+                # Первый запрос — получаем _wbauid
                 try:
-                    resp = requests.get(
-                        "https://www.wildberries.ru",
+                    resp = session.get(
+                        "https://www.wildberries.ru/",
                         headers=headers,
-                        timeout=10
+                        timeout=15,
+                        allow_redirects=True
                     )
-                    resp.raise_for_status()
-                    return [{"name": k, "value": v} for k, v in resp.cookies.items()]
-                except requests.RequestException as e:
-                    logger.warning(f"⚠️ Requests failed: {e}")
+                    
+                    # Второй запрос — пробуем получить токен (редко работает без JS)
+                    time.sleep(2)
+                    resp2 = session.get(
+                        "https://www.wildberries.ru/catalog/0/search.aspx?search=test",
+                        headers=headers,
+                        timeout=15
+                    )
+                    
+                    cookies = []
+                    for name, value in session.cookies.items():
+                        cookies.append({
+                            'name': name,
+                            'value': value,
+                            'domain': '.wildberries.ru',
+                            'path': '/'
+                        })
+                    
+                    return cookies
+                except Exception as e:
+                    logger.warning(f"Requests failed: {e}")
                     return []
 
             cookies = await loop.run_in_executor(None, fetch)
@@ -248,18 +326,14 @@ class CookiesManager:
             logger.error(f"❌ Requests cookie error: {e}", exc_info=True)
 
     def should_update_cookies(self):
-        """Проверяет, пора ли обновлять куки."""
         return (time.time() - self.last_update) > self.update_interval
 
     def get_headers(self, query=None):
-        """Формирует заголовки с актуальными cookies."""
         headers = self.base_headers.copy()
 
-        # Генерация уникального QueryID
         timestamp = int(time.time() * 1000)
         rnd = uuid.uuid4().hex[:8]
         headers["X-QueryID"] = f"qid{self.device_id.replace('site_', '')}{timestamp}{rnd}"
-
         headers["DeviceID"] = self.device_id
 
         if query:
@@ -269,8 +343,16 @@ class CookiesManager:
             headers["Referer"] = "https://www.wildberries.ru/catalog/0/search.aspx"
 
         if self.cookies:
-            cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in self.cookies])
-            headers["Cookie"] = cookie_string
+            # Форматируем куки как в рабочем curl
+            cookie_parts = []
+            for c in self.cookies:
+                name = c.get('name', '')
+                value = c.get('value', '')
+                if name and value:
+                    cookie_parts.append(f"{name}={value}")
+            
+            headers["Cookie"] = "; ".join(cookie_parts)
+            logger.debug(f"Sending cookies: {[c['name'] for c in self.cookies]}")
         else:
             logger.warning("No cookies available!")
 
