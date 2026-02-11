@@ -1,0 +1,25 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Virtual environment ---
+venv/
+env/
+.venv/
+
+# --- IDE / Editors ---
+.vscode/
+.idea/
+
+# --- Logs ---
+*.log
+
+# --- OS files ---
+.DS_Store
+
+# --- Byte-compiled files ---
+*.egg-info/
+build/
+dist/

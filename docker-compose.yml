@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  wb-parser:
+    build: .
+    image: wb-parser:latest
+    container_name: wb-parser
+    env_file:
+      - .env
+    environment:
+      # Переопределяем путь к chromedriver и файлу кеша куков внутри контейнера
+      - CHROME_DRIVER_PATH=/usr/bin/chromedriver
+      - COOKIES_CACHE_FILE=/data/cookies_cache.json
+    volumes:
+      - ./parser.db:/app/parser.db
+      - ./cookies_cache.json:/data/cookies_cache.json
+      - ./logs:/app/logs
+    restart: unless-stopped
+    shm_size: 1g
+    # если хотите, можно включить network_mode: "host" для упрощения; не обязательно
+    command: ["python", "main.py"]
