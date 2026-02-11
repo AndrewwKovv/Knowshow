@@ -1,20 +1,12 @@
-version: "3.8"
 services:
   wb-parser:
-    build: .
     image: wb-parser:latest
     container_name: wb-parser
     env_file:
       - .env
     environment:
       - CHROME_DRIVER_PATH=/usr/bin/chromedriver
-      - COOKIES_CACHE_FILE=/data/cookies_cache.json
-      - DATABASE_URL=sqlite:////app/data/parser.db
-
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - COOKIES_CACHE_FILE=/tmp/cookies_cache.json
     restart: unless-stopped
     shm_size: 1g
-    # если хотите, можно включить network_mode: "host" для упрощения; не обязательно
     command: ["python", "main.py"]
