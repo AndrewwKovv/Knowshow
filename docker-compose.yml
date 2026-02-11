@@ -1,5 +1,6 @@
 services:
   wb-parser:
+    image: yourrepo/wb-parser:latest
     container_name: wb-parser
     env_file:
       - .env
